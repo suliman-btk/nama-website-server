@@ -51,7 +51,7 @@ This will create an admin user with:
 
 #### Applications
 
--   `POST /api/v1/volunteer-applications` - Submit volunteer/intern application
+-   `POST /api/v1/applications` - Submit volunteer/intern application
 
 #### Contact
 
@@ -83,12 +83,12 @@ This will create an admin user with:
 
 #### Applications Management
 
--   `GET /api/v1/admin/volunteer-applications` - List applications
--   `GET /api/v1/admin/volunteer-applications/{id}` - Get application
--   `PUT /api/v1/admin/volunteer-applications/{id}` - Update application
--   `DELETE /api/v1/admin/volunteer-applications/{id}` - Delete application
--   `PATCH /api/v1/admin/volunteer-applications/{id}/approve` - Approve application
--   `PATCH /api/v1/admin/volunteer-applications/{id}/reject` - Reject application
+-   `GET /api/v1/admin/applications` - List applications
+-   `GET /api/v1/admin/applications/{id}` - Get application
+-   `PUT /api/v1/admin/applications/{id}` - Update application
+-   `DELETE /api/v1/admin/applications/{id}` - Delete application
+-   `PATCH /api/v1/admin/applications/{id}/approve` - Approve application
+-   `PATCH /api/v1/admin/applications/{id}/reject` - Reject application
 
 #### Contact Management
 
@@ -116,7 +116,7 @@ This will create an admin user with:
 -   Public access to published journals only
 -   Search and filtering
 
-### Volunteer Applications
+### Applications
 
 -   Public submission form
 -   Admin approval/rejection system

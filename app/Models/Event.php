@@ -52,4 +52,9 @@ class Event extends Model
     {
         return $query->where('start_date', '<', now());
     }
+
+    public function getIsPublishedAttribute()
+    {
+        return $this->status === 'published';
+    }
 }

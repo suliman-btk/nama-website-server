@@ -12,8 +12,14 @@ return Application::configure(basePath: dirname(__DIR__))
         health: '/up',
     )
     ->withMiddleware(function (Middleware $middleware): void {
+        $middleware->api(prepend: [
+            \App\Http\Middleware\CorsMiddleware::class,
+        ]);
+        
         $middleware->alias([
             'admin' => \App\Http\Middleware\AdminMiddleware::class,
+            'auth.simple' => \App\Http\Middleware\SimpleAuthMiddleware::class,
+            'cors' => \App\Http\Middleware\CorsMiddleware::class,
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {

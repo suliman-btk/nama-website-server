@@ -31,7 +31,8 @@ class JournalController extends Controller
             $query->where(function ($q) use ($search) {
                 $q->where('title', 'like', "%{$search}%")
                     ->orWhere('content', 'like', "%{$search}%")
-                    ->orWhere('author', 'like', "%{$search}%");
+                    ->orWhere('description', 'like', "%{$search}%")
+                    ->orWhere('category', 'like', "%{$search}%");
             });
         }
 
@@ -41,6 +42,11 @@ class JournalController extends Controller
         $query->orderBy($sortBy, $sortOrder);
 
         $journals = $query->paginate($request->get('per_page', 15));
+
+        // Add base URL to images for all journals
+        $journals->getCollection()->each(function ($journal) {
+            $this->addImageUrls($journal);
+        });
 
         return response()->json([
             'success' => true,
@@ -58,6 +64,9 @@ class JournalController extends Controller
             ], 404);
         }
 
+        // Add base URL to image
+        $this->addImageUrls($journal);
+
         return response()->json([
             'success' => true,
             'data' => $journal
@@ -68,9 +77,13 @@ class JournalController extends Controller
     {
         $validator = Validator::make($request->all(), [
             'title' => 'required|string|max:255',
-            'content' => 'required|string',
+            'content' => 'nullable|string',
             'excerpt' => 'nullable|string|max:1000',
-            'author' => 'required|string|max:255',
+            'publication_date' => 'nullable|string|max:255',
+            'category' => 'nullable|string|max:255',
+            'description' => 'required|string',
+            'journal_pdf' => 'required|file|mimes:pdf|max:10240', // 10MB max
+            'cover_image' => 'nullable|image|max:2048',
             'featured_image' => 'nullable|image|max:2048',
             'status' => 'in:draft,published',
             'published_at' => 'nullable|date',
@@ -85,7 +98,22 @@ class JournalController extends Controller
             ], 422);
         }
 
-        $data = $request->except(['featured_image']);
+        $data = $request->except(['journal_pdf', 'cover_image', 'featured_image']);
+
+        // Set default content if not provided
+        if (!isset($data['content']) || empty($data['content'])) {
+            $data['content'] = $data['description']; // Use description as content if content is empty
+        }
+
+        // Handle journal PDF upload to S3
+        if ($request->hasFile('journal_pdf')) {
+            $data['journal_pdf'] = $request->file('journal_pdf')->store('journals/pdfs', 's3');
+        }
+
+        // Handle cover image upload to S3
+        if ($request->hasFile('cover_image')) {
+            $data['cover_image'] = $request->file('cover_image')->store('journals/covers', 's3');
+        }
 
         // Handle featured image upload to S3
         if ($request->hasFile('featured_image')) {
@@ -99,6 +127,9 @@ class JournalController extends Controller
 
         $journal = Journal::create($data);
 
+        // Add base URL to images and PDF
+        $this->addImageUrls($journal);
+
         return response()->json([
             'success' => true,
             'message' => 'Journal created successfully',
@@ -110,9 +141,13 @@ class JournalController extends Controller
     {
         $validator = Validator::make($request->all(), [
             'title' => 'sometimes|required|string|max:255',
-            'content' => 'sometimes|required|string',
+            'content' => 'nullable|string',
             'excerpt' => 'nullable|string|max:1000',
-            'author' => 'sometimes|required|string|max:255',
+            'publication_date' => 'nullable|string|max:255',
+            'category' => 'nullable|string|max:255',
+            'description' => 'sometimes|required|string',
+            'journal_pdf' => 'nullable|file|mimes:pdf|max:10240', // 10MB max
+            'cover_image' => 'nullable|image|max:2048',
             'featured_image' => 'nullable|image|max:2048',
             'status' => 'in:draft,published',
             'published_at' => 'nullable|date',
@@ -127,7 +162,30 @@ class JournalController extends Controller
             ], 422);
         }
 
-        $data = $request->except(['featured_image']);
+        $data = $request->except(['journal_pdf', 'cover_image', 'featured_image']);
+
+        // Set default content if not provided
+        if (isset($data['content']) && empty($data['content'])) {
+            $data['content'] = $data['description']; // Use description as content if content is empty
+        }
+
+        // Handle journal PDF upload to S3
+        if ($request->hasFile('journal_pdf')) {
+            // Delete old PDF if exists
+            if ($journal->journal_pdf) {
+                Storage::disk('s3')->delete($journal->journal_pdf);
+            }
+            $data['journal_pdf'] = $request->file('journal_pdf')->store('journals/pdfs', 's3');
+        }
+
+        // Handle cover image upload to S3
+        if ($request->hasFile('cover_image')) {
+            // Delete old cover image if exists
+            if ($journal->cover_image) {
+                Storage::disk('s3')->delete($journal->cover_image);
+            }
+            $data['cover_image'] = $request->file('cover_image')->store('journals/covers', 's3');
+        }
 
         // Handle featured image upload to S3
         if ($request->hasFile('featured_image')) {
@@ -145,6 +203,9 @@ class JournalController extends Controller
 
         $journal->update($data);
 
+        // Add base URL to images and PDF
+        $this->addImageUrls($journal);
+
         return response()->json([
             'success' => true,
             'message' => 'Journal updated successfully',
@@ -154,9 +215,15 @@ class JournalController extends Controller
 
     public function destroy(Journal $journal): JsonResponse
     {
-        // Delete featured image
+        // Delete all files from S3
         if ($journal->featured_image) {
             Storage::disk('s3')->delete($journal->featured_image);
+        }
+        if ($journal->cover_image) {
+            Storage::disk('s3')->delete($journal->cover_image);
+        }
+        if ($journal->journal_pdf) {
+            Storage::disk('s3')->delete($journal->journal_pdf);
         }
 
         $journal->delete();
@@ -165,5 +232,28 @@ class JournalController extends Controller
             'success' => true,
             'message' => 'Journal deleted successfully'
         ]);
+    }
+
+    /**
+     * Add base URL to journal images and PDF
+     */
+    private function addImageUrls($journal)
+    {
+        $baseUrl = rtrim(config('filesystems.disks.s3.url'), '/') . '/';
+
+        // Add URL to featured image
+        if ($journal->featured_image) {
+            $journal->featured_image_url = $baseUrl . $journal->featured_image;
+        }
+
+        // Add URL to cover image
+        if ($journal->cover_image) {
+            $journal->cover_image_url = $baseUrl . $journal->cover_image;
+        }
+
+        // Add URL to journal PDF
+        if ($journal->journal_pdf) {
+            $journal->journal_pdf_url = $baseUrl . $journal->journal_pdf;
+        }
     }
 }

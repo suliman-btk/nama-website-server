@@ -16,7 +16,7 @@ class AuthController extends Controller
     {
         $validator = Validator::make($request->all(), [
             'email' => 'required|email',
-            'password' => 'required|string|min:6',
+            'password' => 'required|string|min:4',
         ]);
 
         if ($validator->fails()) {
@@ -72,5 +72,41 @@ class AuthController extends Controller
             'success' => true,
             'data' => $request->user()
         ]);
+    }
+
+    public function createAdmin(Request $request): JsonResponse
+    {
+        $validator = Validator::make($request->all(), [
+            'name' => 'required|string|max:255',
+            'email' => 'required|email|unique:users,email',
+            'password' => 'required|string|min:6',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Validation failed',
+                'errors' => $validator->errors()
+            ], 422);
+        }
+
+        $user = User::create([
+            'name' => $request->name,
+            'email' => $request->email,
+            'password' => Hash::make($request->password),
+            'is_admin' => true,
+        ]);
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Admin user created successfully',
+            'data' => [
+                'id' => $user->id,
+                'name' => $user->name,
+                'email' => $user->email,
+                'is_admin' => $user->is_admin,
+                'created_at' => $user->created_at,
+            ]
+        ], 201);
     }
 }
