@@ -10,11 +10,13 @@ use App\Http\Controllers\Api\EventController;
 */
 
 // Public routes (with optional authentication)
-Route::get('/events', [EventController::class, 'index']);
-Route::get('/events/{event}', [EventController::class, 'show']);
+Route::middleware(['throttle:api-public'])->group(function () {
+    Route::get('/events', [EventController::class, 'index']);
+    Route::get('/events/{event}', [EventController::class, 'show']);
+});
 
 // Admin routes (protected)
-Route::middleware(['auth:sanctum', 'admin'])->group(function () {
+Route::middleware(['auth:sanctum', 'admin', 'throttle:api-authenticated'])->group(function () {
     Route::apiResource('admin/events', EventController::class);
     Route::post('/admin/events/{event}/galleries', [EventController::class, 'addGallery']);
     Route::delete('/admin/events/{event}/galleries/{gallery}', [EventController::class, 'removeGallery']);

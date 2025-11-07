@@ -10,11 +10,13 @@ use App\Http\Controllers\Api\AuthController;
 */
 
 // Public routes
-Route::post('/auth/login', [AuthController::class, 'login']);
-Route::post('/auth/create-admin', [AuthController::class, 'createAdmin']);
+Route::middleware(['throttle:api-public'])->group(function () {
+    Route::post('/auth/login', [AuthController::class, 'login']);
+    Route::post('/auth/create-admin', [AuthController::class, 'createAdmin']);
+});
 
 // Protected routes
-Route::middleware(['auth:sanctum'])->group(function () {
+Route::middleware(['auth:sanctum', 'throttle:api-authenticated'])->group(function () {
     Route::post('/auth/logout', [AuthController::class, 'logout']);
     Route::get('/auth/me', [AuthController::class, 'me']);
 });

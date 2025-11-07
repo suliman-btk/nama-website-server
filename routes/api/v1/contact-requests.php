@@ -10,10 +10,12 @@ use App\Http\Controllers\Api\ContactRequestController;
 */
 
 // Public routes
-Route::post('/contact-requests', [ContactRequestController::class, 'store']);
+Route::middleware(['throttle:api-public'])->group(function () {
+    Route::post('/contact-requests', [ContactRequestController::class, 'store']);
+});
 
 // Admin routes (protected)
-Route::middleware(['auth:sanctum', 'admin'])->group(function () {
+Route::middleware(['auth:sanctum', 'admin', 'throttle:api-authenticated'])->group(function () {
     Route::apiResource('admin/contact-requests', ContactRequestController::class);
     Route::post('/admin/contact-requests/{contactRequest}/reply', [ContactRequestController::class, 'reply']);
 });

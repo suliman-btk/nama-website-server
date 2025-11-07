@@ -10,10 +10,12 @@ use App\Http\Controllers\Api\JournalController;
 */
 
 // Public routes
-Route::get('/journals', [JournalController::class, 'index']);
-Route::get('/journals/{journal}', [JournalController::class, 'show']);
+Route::middleware(['throttle:api-public'])->group(function () {
+    Route::get('/journals', [JournalController::class, 'index']);
+    Route::get('/journals/{journal}', [JournalController::class, 'show']);
+});
 
 // Admin routes (protected)
-Route::middleware(['auth:sanctum', 'admin'])->group(function () {
+Route::middleware(['auth:sanctum', 'admin', 'throttle:api-authenticated'])->group(function () {
     Route::apiResource('admin/journals', JournalController::class);
 });
