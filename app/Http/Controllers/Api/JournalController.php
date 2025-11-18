@@ -6,22 +6,50 @@ use App\Http\Controllers\Controller;
 use App\Models\Journal;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Validator;
 
-class JournalController extends Controller
+class   JournalController extends Controller
 {
     public function index(Request $request): JsonResponse
     {
+        $isAdmin = $request->user() && $request->user()->is_admin;
+
+        // Build cache key based on request parameters
+        $cacheKey = 'journals_index_' . md5(json_encode([
+            'status' => $request->get('status'),
+            'search' => $request->get('search'),
+            'sort_by' => $request->get('sort_by', 'published_at'),
+            'sort_order' => $request->get('sort_order', 'desc'),
+            'per_page' => $request->get('per_page', 15),
+            'page' => $request->get('page', 1),
+            'is_admin' => $isAdmin,
+        ]));
+
+        // Only cache public requests (non-admin)
+        $shouldCache = !$isAdmin && !$request->has('search');
+
+        if ($shouldCache && Cache::has($cacheKey)) {
+            $cached = Cache::get($cacheKey);
+            $response = response()->json([
+                'success' => true,
+                'data' => $cached['data']
+            ]);
+
+            // Add HTTP caching headers
+            return $this->addCacheHeaders($response, $cached['etag'], $cached['last_modified']);
+        }
+
         $query = Journal::query();
 
         // Filter by status for public access
-        if (!$request->user() || !$request->user()->is_admin) {
+        if (!$isAdmin) {
             $query->published();
         }
 
         // Filter by status if admin
-        if ($request->has('status') && $request->user()?->is_admin) {
+        if ($request->has('status') && $isAdmin) {
             $query->where('status', $request->status);
         }
 
@@ -48,29 +76,81 @@ class JournalController extends Controller
             $this->addImageUrls($journal);
         });
 
-        return response()->json([
+        // Generate ETag and Last-Modified
+        $etag = md5(json_encode($journals));
+        $lastModified = $journals->getCollection()->max('updated_at') ?? now();
+
+        // Cache for 10 minutes (600 seconds) for public requests
+        if ($shouldCache) {
+            Cache::put($cacheKey, [
+                'data' => $journals,
+                'etag' => $etag,
+                'last_modified' => $lastModified,
+            ], now()->addMinutes(10));
+        }
+
+        $response = response()->json([
             'success' => true,
             'data' => $journals
         ]);
+
+        return $this->addCacheHeaders($response, $etag, $lastModified);
     }
 
-    public function show(Journal $journal): JsonResponse
+    public function show(Journal $journal, Request $request): JsonResponse
     {
+        $isAdmin = $request->user() && $request->user()->is_admin;
+
         // Check if journal is published for non-admin users
-        if (!$journal->is_published && (!request()->user() || !request()->user()->is_admin)) {
+        if (!$journal->is_published && !$isAdmin) {
             return response()->json([
                 'success' => false,
                 'message' => 'Journal not found'
             ], 404);
         }
 
+        // Check ETag for conditional requests
+        $etag = md5($journal->id . $journal->updated_at->timestamp);
+        if ($request->header('If-None-Match') === '"' . $etag . '"') {
+            return response()->json([], 304)->withHeaders([
+                'ETag' => '"' . $etag . '"',
+                'Cache-Control' => 'public, max-age=900',
+            ]);
+        }
+
+        // Cache key for public requests
+        $cacheKey = 'journal_' . $journal->id . '_' . $journal->updated_at->timestamp;
+        $shouldCache = !$isAdmin && $journal->is_published;
+
+        if ($shouldCache && Cache::has($cacheKey)) {
+            $cached = Cache::get($cacheKey);
+            $response = response()->json([
+                'success' => true,
+                'data' => $cached['data']
+            ]);
+            return $this->addCacheHeaders($response, $cached['etag'], $cached['last_modified']);
+        }
+
         // Add base URL to image
         $this->addImageUrls($journal);
 
-        return response()->json([
+        $lastModified = $journal->updated_at;
+
+        // Cache for 15 minutes for public requests
+        if ($shouldCache) {
+            Cache::put($cacheKey, [
+                'data' => $journal,
+                'etag' => $etag,
+                'last_modified' => $lastModified,
+            ], now()->addMinutes(15));
+        }
+
+        $response = response()->json([
             'success' => true,
             'data' => $journal
         ]);
+
+        return $this->addCacheHeaders($response, $etag, $lastModified);
     }
 
     public function store(Request $request): JsonResponse
@@ -82,7 +162,7 @@ class JournalController extends Controller
             'publication_date' => 'nullable|string|max:255',
             'category' => 'nullable|string|max:255',
             'description' => 'required|string',
-            'journal_pdf' => 'required|file|mimes:pdf|max:10240', // 10MB max
+            'journal_pdf' => 'required|file|mimes:pdf|max:20240', // 10MB max
             'cover_image' => 'nullable|image|max:2048',
             'featured_image' => 'nullable|image|max:2048',
             'status' => 'in:draft,published',
@@ -121,7 +201,7 @@ class JournalController extends Controller
         }
 
         // Set published_at if status is published
-        if ($data['status'] === 'published' && !$data['published_at']) {
+        if (isset($data['status']) && $data['status'] === 'published' && empty($data['published_at'] ?? null)) {
             $data['published_at'] = now();
         }
 
@@ -129,6 +209,9 @@ class JournalController extends Controller
 
         // Add base URL to images and PDF
         $this->addImageUrls($journal);
+
+        // Clear journals list cache
+        Cache::flush();
 
         return response()->json([
             'success' => true,
@@ -203,12 +286,45 @@ class JournalController extends Controller
 
         $journal->update($data);
 
+        // Clear cache for this journal
+        $this->clearJournalCache($journal);
+
         // Add base URL to images and PDF
         $this->addImageUrls($journal);
 
         return response()->json([
             'success' => true,
             'message' => 'Journal updated successfully',
+            'data' => $journal
+        ]);
+    }
+
+    public function updateStatus(Journal $journal): JsonResponse
+    {
+        // Toggle status between published and draft
+        $newStatus = $journal->status === 'published' ? 'draft' : 'published';
+
+        $data = ['status' => $newStatus];
+
+        // Set published_at when publishing
+        if ($newStatus === 'published') {
+            $data['published_at'] = now();
+        }
+
+        $journal->update($data);
+
+        // Refresh the model to get updated data
+        $journal->refresh();
+
+        // Clear cache for this journal
+        $this->clearJournalCache($journal);
+
+        // Add base URL to images and PDF
+        $this->addImageUrls($journal);
+
+        return response()->json([
+            'success' => true,
+            'message' => "Journal status changed to {$newStatus} successfully",
             'data' => $journal
         ]);
     }
@@ -226,7 +342,13 @@ class JournalController extends Controller
             Storage::disk('s3')->delete($journal->journal_pdf);
         }
 
+        // Clear cache before deletion
+        $this->clearJournalCache($journal);
+
         $journal->delete();
+
+        // Clear journals list cache
+        Cache::flush();
 
         return response()->json([
             'success' => true,
@@ -255,5 +377,30 @@ class JournalController extends Controller
         if ($journal->journal_pdf) {
             $journal->journal_pdf_url = $baseUrl . $journal->journal_pdf;
         }
+    }
+
+    /**
+     * Add HTTP caching headers to response
+     */
+    private function addCacheHeaders($response, $etag, $lastModified)
+    {
+        return $response->withHeaders([
+            'ETag' => '"' . $etag . '"',
+            'Last-Modified' => $lastModified->toRfc7231String(),
+            'Cache-Control' => 'public, max-age=900', // 15 minutes
+        ]);
+    }
+
+    /**
+     * Clear cache for a specific journal
+     */
+    private function clearJournalCache($journal)
+    {
+        // Clear individual journal cache
+        $cacheKey = 'journal_' . $journal->id . '_' . $journal->updated_at->timestamp;
+        Cache::forget($cacheKey);
+
+        // Clear all journals list caches
+        Cache::flush(); // Simple approach - clears all cache
     }
 }

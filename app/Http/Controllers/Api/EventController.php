@@ -7,6 +7,7 @@ use App\Models\Event;
 use App\Models\EventGallery;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Validator;
 use Laravel\Sanctum\PersonalAccessToken;
@@ -31,11 +32,36 @@ class EventController extends Controller
 
     public function index(Request $request): JsonResponse
     {
-        $query = Event::with('galleries');
-
         // Manually check authentication
         $user = $this->getAuthenticatedUser($request);
         $isAdmin = $user && $user->is_admin;
+
+        // Build cache key based on request parameters
+        $cacheKey = 'events_index_' . md5(json_encode([
+            'status' => $request->get('status'),
+            'search' => $request->get('search'),
+            'sort_by' => $request->get('sort_by', 'start_date'),
+            'sort_order' => $request->get('sort_order', 'asc'),
+            'per_page' => $request->get('per_page', 15),
+            'page' => $request->get('page', 1),
+            'is_admin' => $isAdmin,
+        ]));
+
+        // Only cache public requests (non-admin)
+        $shouldCache = !$isAdmin && !$request->has('search');
+
+        if ($shouldCache && Cache::has($cacheKey)) {
+            $cached = Cache::get($cacheKey);
+            $response = response()->json([
+                'success' => true,
+                'data' => $cached['data']
+            ]);
+
+            // Add HTTP caching headers
+            return $this->addCacheHeaders($response, $cached['etag'], $cached['last_modified']);
+        }
+
+        $query = Event::with('galleries');
 
         // Filter by status for public access
         if (!$isAdmin) {
@@ -68,16 +94,32 @@ class EventController extends Controller
             $this->addImageUrls($event);
         });
 
-        return response()->json([
+        $responseData = [
             'success' => true,
             'data' => $events
-        ]);
+        ];
+
+        // Generate ETag and Last-Modified
+        $etag = md5(json_encode($events));
+        $lastModified = $events->getCollection()->max('updated_at') ?? now();
+
+        // Cache for 10 minutes (600 seconds) for public requests
+        if ($shouldCache) {
+            Cache::put($cacheKey, [
+                'data' => $events,
+                'etag' => $etag,
+                'last_modified' => $lastModified,
+            ], now()->addMinutes(10));
+        }
+
+        $response = response()->json($responseData);
+        return $this->addCacheHeaders($response, $etag, $lastModified);
     }
 
-    public function show(Event $event): JsonResponse
+    public function show(Event $event, Request $request): JsonResponse
     {
         // Manually check authentication
-        $user = $this->getAuthenticatedUser(request());
+        $user = $this->getAuthenticatedUser($request);
         $isAdmin = $user && $user->is_admin;
 
         // Check if event is published for non-admin users
@@ -88,15 +130,50 @@ class EventController extends Controller
             ], 404);
         }
 
+        // Check ETag for conditional requests
+        $etag = md5($event->id . $event->updated_at->timestamp);
+        if ($request->header('If-None-Match') === '"' . $etag . '"') {
+            return response()->json([], 304)->withHeaders([
+                'ETag' => '"' . $etag . '"',
+                'Cache-Control' => 'public, max-age=600',
+            ]);
+        }
+
+        // Cache key for public requests
+        $cacheKey = 'event_' . $event->id . '_' . $event->updated_at->timestamp;
+        $shouldCache = !$isAdmin && $event->is_published;
+
+        if ($shouldCache && Cache::has($cacheKey)) {
+            $cached = Cache::get($cacheKey);
+            $response = response()->json([
+                'success' => true,
+                'data' => $cached['data']
+            ]);
+            return $this->addCacheHeaders($response, $cached['etag'], $cached['last_modified']);
+        }
+
         $event->load('galleries');
 
         // Add base URL to images
         $this->addImageUrls($event);
 
-        return response()->json([
+        $lastModified = $event->updated_at;
+
+        // Cache for 15 minutes for public requests
+        if ($shouldCache) {
+            Cache::put($cacheKey, [
+                'data' => $event,
+                'etag' => $etag,
+                'last_modified' => $lastModified,
+            ], now()->addMinutes(15));
+        }
+
+        $response = response()->json([
             'success' => true,
             'data' => $event
         ]);
+
+        return $this->addCacheHeaders($response, $etag, $lastModified);
     }
 
     public function store(Request $request): JsonResponse
@@ -153,6 +230,9 @@ class EventController extends Controller
         // Add base URL to images
         $this->addImageUrls($event);
 
+        // Clear events list cache
+        Cache::flush();
+
         return response()->json([
             'success' => true,
             'message' => 'Event created successfully',
@@ -196,6 +276,9 @@ class EventController extends Controller
         }
 
         $event->update($data);
+
+        // Clear cache for this event
+        $this->clearEventCache($event);
 
         // Handle gallery images
         if ($request->has('galleries')) {
@@ -244,7 +327,13 @@ class EventController extends Controller
             Storage::disk('s3')->delete($gallery->image_path);
         }
 
+        // Clear cache before deletion
+        $this->clearEventCache($event);
+
         $event->delete();
+
+        // Clear events list cache
+        Cache::flush(); // Or use a more targeted approach
 
         return response()->json([
             'success' => true,
@@ -276,6 +365,10 @@ class EventController extends Controller
             'sort_order' => $event->galleries()->max('sort_order') + 1,
         ]);
 
+        // Clear event cache when gallery is added
+        $event->refresh();
+        $this->clearEventCache($event);
+
         return response()->json([
             'success' => true,
             'message' => 'Gallery image added successfully',
@@ -294,6 +387,10 @@ class EventController extends Controller
 
         Storage::disk('s3')->delete($gallery->image_path);
         $gallery->delete();
+
+        // Clear event cache when gallery is removed
+        $event->refresh();
+        $this->clearEventCache($event);
 
         return response()->json([
             'success' => true,
@@ -317,6 +414,9 @@ class EventController extends Controller
 
         $oldStatus = $event->status;
         $event->update(['status' => $request->status]);
+
+        // Clear cache when status changes
+        $this->clearEventCache($event);
 
         $statusMessages = [
             'draft' => 'Event moved to draft',
@@ -355,5 +455,31 @@ class EventController extends Controller
                 $gallery->image_url = $baseUrl . $gallery->image_path;
             });
         }
+    }
+
+    /**
+     * Add HTTP caching headers to response
+     */
+    private function addCacheHeaders($response, $etag, $lastModified)
+    {
+        return $response->withHeaders([
+            'ETag' => '"' . $etag . '"',
+            'Last-Modified' => $lastModified->toRfc7231String(),
+            'Cache-Control' => 'public, max-age=600', // 10 minutes
+        ]);
+    }
+
+    /**
+     * Clear cache for a specific event
+     */
+    private function clearEventCache($event)
+    {
+        // Clear individual event cache
+        $cacheKey = 'event_' . $event->id . '_' . $event->updated_at->timestamp;
+        Cache::forget($cacheKey);
+
+        // Clear all events list caches (pattern matching)
+        // Note: For better performance, use cache tags if Redis is available
+        Cache::flush(); // Simple approach - clears all cache
     }
 }

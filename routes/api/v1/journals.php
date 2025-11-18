@@ -18,4 +18,5 @@ Route::middleware(['throttle:api-public'])->group(function () {
 // Admin routes (protected)
 Route::middleware(['auth:sanctum', 'admin', 'throttle:api-authenticated'])->group(function () {
     Route::apiResource('admin/journals', JournalController::class);
+    Route::patch('/admin/journals/{journal}/status', [JournalController::class, 'updateStatus']);
 });

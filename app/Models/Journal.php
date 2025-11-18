@@ -43,4 +43,9 @@ class Journal extends Model
     {
         return $query->orderBy('published_at', 'desc');
     }
+
+    public function getIsPublishedAttribute()
+    {
+        return $this->status === 'published';
+    }
 }
