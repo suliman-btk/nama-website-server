@@ -122,6 +122,9 @@ class EventController extends Controller
         $user = $this->getAuthenticatedUser($request);
         $isAdmin = $user && $user->is_admin;
 
+        // Always refresh event data from database to ensure we have the latest status
+        $event->refresh();
+
         // Check if event is published for non-admin users
         if (!$event->is_published && !$isAdmin) {
             return response()->json([
@@ -264,7 +267,73 @@ class EventController extends Controller
             ], 422);
         }
 
-        $data = $request->except(['featured_image', 'galleries']);
+        // Collect updateable fields - handle both JSON and form-data
+        $data = [];
+
+        // Define fields that can be updated
+        $updateableFields = ['title', 'description', 'short_description', 'start_date', 'end_date', 'location', 'status', 'metadata'];
+
+        // For PUT requests with multipart/form-data, Laravel doesn't parse it automatically
+        // Parse it manually from php://input
+        $contentType = $request->header('Content-Type', '');
+        $isMultipart = str_contains($contentType, 'multipart/form-data');
+
+        if ($isMultipart && in_array($request->method(), ['PUT', 'PATCH'])) {
+            // Parse multipart/form-data manually
+            $rawContent = file_get_contents('php://input');
+
+            // Extract boundary from Content-Type header
+            $boundary = null;
+            if (preg_match('/boundary=(.+)$/i', $contentType, $matches)) {
+                $boundary = trim($matches[1]);
+            }
+
+            $formData = [];
+
+            if ($boundary && !empty($rawContent)) {
+                // Split by boundary
+                $parts = explode('--' . $boundary, $rawContent);
+
+                foreach ($parts as $part) {
+                    // Skip empty parts and the closing boundary
+                    $part = trim($part);
+                    if (empty($part) || $part === '--') {
+                        continue;
+                    }
+
+                    // Extract field name and value
+                    if (preg_match('/name="([^"]+)"\s*\r?\n\r?\n(.*?)(?=\r?\n--|$)/s', $part, $matches)) {
+                        $fieldName = $matches[1];
+                        $fieldValue = trim($matches[2]);
+
+                        // Only include updateable fields
+                        if (in_array($fieldName, $updateableFields)) {
+                            $formData[$fieldName] = $fieldValue;
+                        }
+                    }
+                }
+            }
+
+            // Use parsed form data
+            foreach ($updateableFields as $field) {
+                if (isset($formData[$field]) && $formData[$field] !== null && $formData[$field] !== '') {
+                    $data[$field] = $formData[$field];
+                }
+            }
+        } else {
+            // For JSON or POST requests, use standard methods
+            $jsonData = $request->all();
+            $inputData = $request->input();
+            $requestData = $request->request->all();
+
+            $allRequestData = array_merge($jsonData, $requestData, $inputData);
+
+            foreach ($updateableFields as $field) {
+                if (isset($allRequestData[$field]) && $allRequestData[$field] !== null) {
+                    $data[$field] = $allRequestData[$field];
+                }
+            }
+        }
 
         // Handle featured image upload to S3
         if ($request->hasFile('featured_image')) {
@@ -275,7 +344,11 @@ class EventController extends Controller
             $data['featured_image'] = $request->file('featured_image')->store('events/featured', 's3');
         }
 
+        // Update the event with the collected data
         $event->update($data);
+
+        // Refresh event to get latest data from database
+        $event->refresh();
 
         // Clear cache for this event
         $this->clearEventCache($event);
@@ -414,6 +487,9 @@ class EventController extends Controller
 
         $oldStatus = $event->status;
         $event->update(['status' => $request->status]);
+
+        // Refresh event to get latest data from database
+        $event->refresh();
 
         // Clear cache when status changes
         $this->clearEventCache($event);

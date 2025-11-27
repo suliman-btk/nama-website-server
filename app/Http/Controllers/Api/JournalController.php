@@ -245,11 +245,67 @@ class   JournalController extends Controller
             ], 422);
         }
 
-        $data = $request->except(['journal_pdf', 'cover_image', 'featured_image']);
+        // Collect updateable fields - handle both JSON and form-data
+        $data = [];
+        
+        // Define fields that can be updated
+        $updateableFields = ['title', 'content', 'excerpt', 'publication_date', 'category', 'description', 'status', 'published_at', 'metadata'];
+        
+        // For PUT requests with multipart/form-data, Laravel doesn't parse it automatically
+        // Parse it manually from php://input
+        $contentType = $request->header('Content-Type', '');
+        $isMultipart = str_contains($contentType, 'multipart/form-data');
+        
+        if ($isMultipart && in_array($request->method(), ['PUT', 'PATCH'])) {
+            // Parse multipart/form-data manually
+            $rawContent = file_get_contents('php://input');
+            
+            // Extract boundary from Content-Type header
+            $boundary = null;
+            if (preg_match('/boundary=(.+)$/i', $contentType, $matches)) {
+                $boundary = trim($matches[1]);
+            }
+            
+            $formData = [];
+            
+            if ($boundary && !empty($rawContent)) {
+                // Split by boundary
+                $parts = explode('--' . $boundary, $rawContent);
+                
+                foreach ($parts as $part) {
+                    // Skip empty parts and the closing boundary
+                    $part = trim($part);
+                    if (empty($part) || $part === '--') {
+                        continue;
+                    }
+                    
+                    // Extract field name and value
+                    if (preg_match('/name="([^"]+)"\s*\r?\n\r?\n(.*?)(?=\r?\n--|$)/s', $part, $matches)) {
+                        $fieldName = $matches[1];
+                        $fieldValue = trim($matches[2]);
+                        
+                        // Only include updateable fields (skip file fields)
+                        if (in_array($fieldName, $updateableFields)) {
+                            $formData[$fieldName] = $fieldValue;
+                        }
+                    }
+                }
+            }
+            
+            // Use parsed form data
+            foreach ($updateableFields as $field) {
+                if (isset($formData[$field]) && $formData[$field] !== null && $formData[$field] !== '') {
+                    $data[$field] = $formData[$field];
+                }
+            }
+        } else {
+            // For JSON or POST requests, use standard methods
+            $data = $request->except(['journal_pdf', 'cover_image', 'featured_image']);
+        }
 
         // Set default content if not provided
         if (isset($data['content']) && empty($data['content'])) {
-            $data['content'] = $data['description']; // Use description as content if content is empty
+            $data['content'] = $data['description'] ?? ''; // Use description as content if content is empty
         }
 
         // Handle journal PDF upload to S3
@@ -280,7 +336,7 @@ class   JournalController extends Controller
         }
 
         // Set published_at if status is published and not already set
-        if ($data['status'] === 'published' && !$journal->published_at) {
+        if (isset($data['status']) && $data['status'] === 'published' && !$journal->published_at) {
             $data['published_at'] = now();
         }
 
