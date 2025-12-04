@@ -24,6 +24,8 @@ return [
         'http://127.0.0.1:3000',
         'http://localhost:3001',
         'http://127.0.0.1:3001',
+        "https://test-1.namafoundation.org",
+        "https://namafoundation.org",
     ],
 
     'allowed_origins_patterns' => [],
